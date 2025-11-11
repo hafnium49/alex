@@ -25,10 +25,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - uv may warn about nested projects - this is expected and can be ignored
 
 ### Terraform
-- Each terraform directory (2_sagemaker, 3_ingestion, etc.) is **independent** with its own state
-- **MUST copy `terraform.tfvars.example` to `terraform.tfvars`** before applying
-- No shared state, no remote backends - all local state files
-- Apply/destroy order matters: deploy 2→8, destroy 8→2
+
+**Independent Directory Architecture:**
+
+Each terraform directory (2_sagemaker, 3_ingestion, etc.) is **independent** with:
+- Its own local state file (`terraform.tfstate`)
+- Its own `terraform.tfvars` configuration
+- No dependencies on other terraform directories
+
+**This is intentional** for educational purposes:
+- Students can deploy incrementally, guide by guide
+- State files are local (simpler than remote S3 state)
+- Each part can be destroyed independently
+- No complex state bucket setup needed
+- Infrastructure can be destroyed step by step
+
+**Critical Requirements:**
+- ⚠️ **MUST copy `terraform.tfvars.example` to `terraform.tfvars`** before applying
+- Common pattern: Use Cursor File Explorer to copy and edit in each directory
+- If `terraform.tfvars` is missing or misconfigured:
+  - Terraform will use default values (often wrong)
+  - Resources may fail to create with cryptic errors
+  - Cross-service connections will break
+
+**State Management:**
+- State files are `.gitignored` automatically
+- Local state means no S3 bucket needed
+- Students can `terraform destroy` each directory independently
+- If a student loses state, they may need to import existing resources or recreate
+
+**Deployment Order:**
+- Apply order matters: deploy 2→8
+- Destroy order recommended: destroy 8→2 (reverse)
 
 ### Docker
 - Lambda packaging requires Docker Desktop running (for linux/amd64 builds)
@@ -308,47 +336,184 @@ CLERK_SECRET_KEY=
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-## Common Issues & Solutions
+## Common Issues & Troubleshooting
 
-### Docker Packaging Fails
-- **Check**: Is Docker Desktop running? Run `docker ps` to verify
-- **Check**: Docker file sharing enabled for working directory
-- **Not the issue**: uv nested project warnings (these are harmless)
+**The most common issues relate to AWS region choices! Check environment variables, terraform settings (everything should propagate from tfvars).**
 
-### Bedrock Model Access Denied
-- **Check**: Model access granted in Bedrock console for the region
-- **Check**: Nova Pro (`us.amazon.nova-pro-v1:0`) is recommended (Claude has rate limits)
-- **Check**: Cross-region inference profiles need multi-region access
-- **Check**: `AWS_REGION_NAME` environment variable set (LiteLLM requires this specific name)
-- **Debug**: Add logging to confirm which region/model is being used
+### Issue 1: `package_docker.py` Fails
 
-### Terraform Apply Fails
-- **Check**: `terraform.tfvars` exists and is populated
-- **Check**: Values from previous guide outputs (use `terraform output` in earlier directories)
-- **Check**: ARNs/endpoints from previous guides are correct
+**Symptoms**: Script fails with uv warning about nested projects and perhaps an error message
 
-### Lambda Import Errors
-- **Check**: Package built with Docker (linux/amd64 architecture)
-- **Check**: Dependencies in `pyproject.toml` are correct
-- **Re-package**: `cd backend/{agent} && uv run package_docker.py`
-- **Check CloudWatch logs**: `aws logs tail /aws/lambda/alex-{agent} --follow`
+**Root Cause (common)**: Docker Desktop is not running or a Docker mounts denied issue
 
-### Database Connection Issues
-- **Check**: Cluster is "available" status: `aws rds describe-db-clusters`
-- **Check**: Data API is enabled (`EnableHttpEndpoint: true`)
-- **Check**: ARNs in environment match actual resources
-- **Wait**: Database initialization takes 10-15 minutes after first deploy
+**Diagnosis**:
+1. Ask: "Is Docker Desktop running?"
+2. Check: Can they run `docker ps` successfully?
+3. Recent fix: The script now gives better error messages, but older versions were misleading
+
+**Solution**: Start Docker Desktop, wait for it to fully initialize, then retry
+
+**If the issue is a Mounts Denied error**: It fails to mount the /tmp directory into Docker as it doesn't have access to it. Going to Docker Desktop app, and adding the directory mentioned in the error to the shared paths (Settings → Resources → File Sharing) solved the problem for a student.
+
+**Not the solution**: Changing uv project configurations (this is a red herring)
+
+### Issue 2: Region Issues and Bedrock Model Access Denied
+
+**Symptoms**: "Access denied" or "Model not found" errors when running agents
+
+**Root Cause**: Model access not granted in Bedrock, or wrong region
+
+**Diagnosis**:
+1. Which model are they trying to use?
+2. Which region is their code running in?
+3. Have they requested model access in Bedrock console?
+4. For inference profiles: Do they have permissions for multiple regions?
+5. Are the right environment variables being set? LiteLLM needs `AWS_REGION_NAME`. Check that nothing is being hardcoded in the code, and that tfvars are set right. Add logging to confirm which region is being used.
+
+**Solution**:
+1. Go to Bedrock console in the correct region
+2. Click "Model access"
+3. Request access to Nova Pro
+4. For cross-region: Set up inference profiles with multi-region permissions
+
+### Issue 3: Terraform Apply Fails
+
+**Symptoms**: Resources fail to create, dependency errors, ARN not found
+
+**Root Cause**: `terraform.tfvars` not configured, or values from previous guides not set
+
+**Diagnosis**:
+1. Does `terraform.tfvars` exist in this directory?
+2. Are all required variables set (check `terraform.tfvars.example`)?
+3. For later guides: Do they have output values from earlier guides?
+4. Run `terraform output` in previous directories to get required ARNs
+
+**Solution**:
+1. Copy `terraform.tfvars.example` to `terraform.tfvars`
+2. Fill in all required values
+3. Get ARNs from previous terraform outputs: `cd terraform/X_previous && terraform output`
+4. Update `.env` file with values for Python scripts
+
+### Issue 4: Lambda Function Failures
+
+**Symptoms**: 500 errors, timeout errors, "Module not found" errors
+
+**Root Cause**: Package not built correctly, environment variables missing, or IAM permissions
+
+**Diagnosis**:
+1. Check CloudWatch logs: `aws logs tail /aws/lambda/alex-{agent-name} --follow`
+2. Check Lambda environment variables in AWS Console
+3. Check IAM role has required permissions
+4. Was the Lambda package built with Docker for linux/amd64?
+
+**Solution**:
+1. For packaging: Re-run `package_docker.py` with Docker running
+2. For env vars: Verify in Lambda console or `terraform.tfvars`
+3. For permissions: Check IAM role policy in terraform
+
+### Issue 5: Aurora Database Connection Fails
+
+**Symptoms**: "Cluster not found", "Secret not found", Data API errors
+
+**Root Cause**: Database not fully initialized, wrong ARNs, or Data API not enabled
+
+**Diagnosis**:
+1. Check cluster status: `aws rds describe-db-clusters`
+2. Verify Data API is enabled (should show `EnableHttpEndpoint: true`)
+3. Check ARNs in environment variables match actual resources
+4. Database may still be initializing (takes 10-15 minutes)
+
+**Solution**:
+1. Wait for cluster to reach "available" status
+2. Verify Data API is enabled in RDS console
+3. Run `terraform output` in `5_database` to get correct ARNs
+4. Update environment variables with actual ARNs
 
 ## Project Context
 
-This is an educational project for the "AI in Production" course by Ed Donner. Users are students learning to deploy production AI systems. The guides (in `guides/` directory) provide step-by-step instructions for deploying each component.
+This is an educational project for the "AI in Production" course by Ed Donner (Udemy). Users are students learning to deploy production AI systems. Students work in Cursor (VS Code fork) on Windows/Mac/Linux. They're familiar with AWS services and have been introduced to Terraform, uv, NextJS, and Docker.
 
-When helping users:
-1. Ask which guide they're working on (1-8) to understand what's deployed
-2. Check actual error messages and CloudWatch logs before diagnosing
-3. Verify prerequisites (Docker running, terraform.tfvars configured, model access granted)
-4. Make minimal, targeted changes - avoid over-engineering solutions
-5. Help them understand the problem, not just fix it
+**Student Setup:**
+- AWS root user + IAM user "aiengineer" with permissions
+- AWS CLI configured with aiengineer user
+- Budget alerts set (but should regularly check billing)
+
+### Working with Students: Core Principles
+
+**IMPORTANT: Before starting, read all guides (1-8) in the guides folder for full background.**
+
+#### 1. Always Establish Context First
+
+When a student asks for help:
+1. **Ask which guide/day they're on** - Critical for understanding what infrastructure is deployed
+2. **Ask what they're trying to accomplish** - Understand the goal before diving into code
+3. **Ask what error or behavior they're seeing** - Get actual error message, not interpretation
+
+#### 2. Diagnose Before Fixing ⚠️ MOST IMPORTANT
+
+**DO NOT jump to conclusions and write lots of code before the problem is truly understood.**
+
+Common mistakes to avoid:
+- Writing defensive code with `isinstance()` checks before understanding root cause
+- Adding try/except blocks that hide the real error
+- Creating workarounds that mask the actual problem
+- Making multiple changes at once (makes debugging impossible)
+
+**Instead, follow this process:**
+1. **Reproduce the issue** - Ask for exact error messages, logs, commands
+2. **Identify root cause** - Use CloudWatch logs, AWS Console, error traces
+3. **Verify understanding** - Explain what you think is happening and confirm with student
+4. **Propose minimal fix** - Change one thing at a time
+5. **Test and verify** - Confirm the fix works before moving on
+
+#### 3. Common Root Causes (Check These First)
+
+**Docker Desktop Not Running** (Most common with `package_docker.py`)
+- Script fails with generic uv warning about nested projects
+- Real issue is Docker isn't running
+- Students often get distracted by the uv warning
+- **Always ask**: "Is Docker Desktop running?"
+- **Mounts Denied error**: Add directory to Docker file sharing (Settings → Resources → File Sharing)
+
+**AWS Permissions Issues** (Most common overall)
+- Missing IAM policies for specific AWS services
+- Region-specific permissions (especially for Bedrock inference profiles)
+- Inference profiles require permissions for MULTIPLE regions
+- **Check**: IAM policies, AWS region settings, Bedrock model access
+
+**Terraform Variables Not Set**
+- Each terraform directory needs `terraform.tfvars` configured
+- Missing or incorrect variables cause cryptic errors
+- **Check**: Does `terraform.tfvars` exist? Are all required variables set?
+
+**AWS Region Mismatches**
+- Bedrock models may only be available in specific regions
+- Nova Pro requires inference profiles
+- Cross-region resource access may need models approved in Bedrock in multiple regions
+- **Check**: Region consistency across configuration files
+
+**Model Access Not Granted**
+- AWS Bedrock requires explicit model access requests
+- Nova Pro is recommended (Claude Sonnet has strict rate limits)
+- Access is per-region; inference profiles may require multiple regions
+- **Check**: Bedrock console → Model access
+
+#### 4. Current Model Strategy
+
+**Use Nova Pro, not Claude Sonnet**
+- Nova Pro (`us.amazon.nova-pro-v1:0` or `eu.amazon.nova-pro-v1:0`) is recommended
+- Requires inference profiles for cross-region access
+- Claude Sonnet has too strict rate limits for this project
+- Students need to request access in AWS Bedrock console, potentially for multiple regions
+
+#### 5. Help Students Help Themselves
+
+Encourage students to:
+- Read error messages carefully (especially CloudWatch logs)
+- Check AWS Console to verify resources exist
+- Use `terraform output` to see deployed resource details
+- Test incrementally (don't deploy everything at once)
+- Keep AWS costs in mind (remind them to destroy when not actively working)
 
 ## File Locations
 
@@ -402,3 +567,86 @@ Primary costs: Aurora Serverless v2 (runs continuously)
 - Destroy Aurora when not actively working: `cd terraform/5_database && terraform destroy`
 - Monitor: AWS Cost Explorer, billing alerts
 - Each terraform component can be destroyed independently
+
+**Cleanup Process (reverse order recommended):**
+```bash
+cd terraform/8_enterprise && terraform destroy
+cd terraform/7_frontend && terraform destroy
+cd terraform/6_agents && terraform destroy
+cd terraform/5_database && terraform destroy  # Biggest cost savings
+cd terraform/4_researcher && terraform destroy
+cd terraform/3_ingestion && terraform destroy
+cd terraform/2_sagemaker && terraform destroy
+```
+
+---
+
+## Course Structure: Week 3 & 4
+
+### Week 3: Research Infrastructure
+
+**Day 3 - Foundations**
+- Guide 1: AWS Permissions (IAM setup, AlexAccess group)
+- Guide 2: SageMaker Deployment (HuggingFace embeddings endpoint)
+
+**Day 4 - Vector Storage**
+- Guide 3: Ingestion Pipeline (S3 Vectors, Lambda, API Gateway)
+
+**Day 5 - Research Agent**
+- Guide 4: Researcher Agent (App Runner, Bedrock Nova Pro, Playwright MCP)
+
+### Week 4: Portfolio Management Platform
+
+**Day 1 - Database**
+- Guide 5: Database & Infrastructure (Aurora Serverless v2, Data API, seed data)
+
+**Day 2 - Agent Orchestra**
+- Guide 6: AI Agent Orchestra (5 Lambda agents, SQS orchestration, parallel processing)
+
+**Day 3 - Frontend**
+- Guide 7: Frontend & API (Clerk auth, NextJS, FastAPI backend, CloudFront)
+
+**Day 4 - Enterprise Features**
+- Guide 8: Enterprise Grade (CloudWatch, WAF, GuardDuty, LangFuse observability)
+
+---
+
+## Getting Help
+
+### For Students
+
+If you're stuck:
+1. **Check the guide carefully** - Most steps have troubleshooting sections
+2. **Review error messages** - Look at CloudWatch logs, not just terminal output
+3. **Verify prerequisites** - Is Docker running? Are permissions set? Is terraform.tfvars configured?
+4. **Contact the instructor**:
+   - Post a question in Udemy (include guide number, error message, what you've tried)
+   - Email Ed Donner: ed@edwarddonner.com
+
+When asking for help, include:
+- Which guide/day you're on
+- Exact error message (copy/paste, don't paraphrase)
+- What command you ran
+- Relevant CloudWatch logs if available
+- What you've already tried
+
+### For AI Assistants (Claude Code)
+
+When helping students:
+0. **Prepare** - Read all the guides to be fully briefed
+1. **Establish context** - Which guide? What's the goal?
+2. **Get error details** - Actual messages, logs, console output
+3. **Diagnose first** - Don't write code before understanding the problem
+4. **Think incrementally** - One change at a time
+5. **Verify understanding** - Explain what you think is wrong before fixing
+6. **Keep it simple** - Avoid over-engineering solutions
+
+**Remember**: Students are learning. The goal is to help them understand what went wrong and how to fix it, not just to make the error go away.
+
+---
+
+**Course**: AI in Production
+**Instructor**: Ed Donner
+**Platform**: Udemy
+**Project**: Alex - Capstone for Weeks 3-4
+**Last Updated**: January 2025
