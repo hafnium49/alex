@@ -232,4 +232,5 @@ backend/**/*_lambda.zip
 !backend/scheduler/lambda_function.zip
 !frontend/lib
 
-terraform/2_sagemaker/.*
+terraform/*/.*
+.terraform.tfstate.lock.info
